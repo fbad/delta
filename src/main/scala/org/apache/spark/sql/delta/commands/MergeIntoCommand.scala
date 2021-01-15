@@ -38,6 +38,7 @@ import org.apache.spark.sql.catalyst.expressions.BasePredicate
 import org.apache.spark.sql.catalyst.expressions.NamedExpression
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
@@ -212,6 +213,16 @@ case class MergeIntoCommand(
 
   @transient private lazy val sc: SparkContext = SparkContext.getOrCreate()
   @transient private lazy val targetDeltaLog: DeltaLog = targetFileIndex.deltaLog
+  @transient private lazy val targetOutputAttributesMap: Map[String, Attribute] = {
+    val originalTargetOutputAttributesMap = target
+      .outputSet
+      .map(attr => attr.name -> attr).toMap
+    if (conf.caseSensitiveAnalysis) {
+      originalTargetOutputAttributesMap
+    } else {
+      CaseInsensitiveMap(originalTargetOutputAttributesMap)
+    }
+  }
 
   /** Whether this merge statement has only a single insert (NOT MATCHED) clause. */
   private def isSingleInsertOnly: Boolean = matchedClauses.isEmpty && notMatchedClauses.length == 1
@@ -568,11 +579,12 @@ case class MergeIntoCommand(
     // create an alias
     val aliases = plan.output.map {
       case newAttrib: AttributeReference =>
-        val existingTargetAttrib = getTargetOutputCols(deltaTxn).find(_.name == newAttrib.name)
+        val targetOutputColsMap = getTargetOutputColsMap(deltaTxn)
+        val existingTargetAttrib = targetOutputColsMap.get(newAttrib.name)
           .getOrElse {
             throw new AnalysisException(
               s"Could not find ${newAttrib.name} among the existing target output " +
-                s"${getTargetOutputCols(deltaTxn)}")
+                s"${targetOutputColsMap.values}")
           }.asInstanceOf[AttributeReference]
         Alias(newAttrib, existingTargetAttrib.name)(exprId = existingTargetAttrib.exprId)
     }
@@ -590,9 +602,26 @@ case class MergeIntoCommand(
 
   private def getTargetOutputCols(txn: OptimisticTransaction): Seq[NamedExpression] = {
     txn.metadata.schema.map { col =>
-      target.output.find(attr => conf.resolver(attr.name, col.name)).getOrElse {
+      targetOutputAttributesMap.getOrElse(
+        col.name,
         Alias(Literal(null, col.dataType), col.name)()
-      }
+      )
+    }
+  }
+
+  private def getTargetOutputColsMap(
+    txn: OptimisticTransaction
+  ): Map[String, NamedExpression] = {
+    val originalTargetOutputColsMap = txn.metadata.schema.map { col =>
+      col.name -> targetOutputAttributesMap.getOrElse(
+        col.name,
+        Alias(Literal(null, col.dataType), col.name)()
+      )
+    }.toMap
+    if (conf.caseSensitiveAnalysis) {
+      originalTargetOutputColsMap
+    } else {
+      CaseInsensitiveMap(originalTargetOutputColsMap)
     }
   }
 
