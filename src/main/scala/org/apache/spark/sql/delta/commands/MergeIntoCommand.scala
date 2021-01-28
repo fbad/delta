@@ -214,9 +214,9 @@ case class MergeIntoCommand(
   @transient private lazy val sc: SparkContext = SparkContext.getOrCreate()
   @transient private lazy val targetDeltaLog: DeltaLog = targetFileIndex.deltaLog
   @transient private lazy val targetOutputAttributesMap: Map[String, Attribute] = {
-    val originalTargetOutputAttributesMap = target
+    val originalTargetOutputAttributesMap: Map[String, Attribute] = target
       .outputSet
-      .map(attr => attr.name -> attr).toMap
+      .map(attr => attr.name -> attr)(scala.collection.breakOut)
     if (conf.caseSensitiveAnalysis) {
       originalTargetOutputAttributesMap
     } else {
@@ -574,12 +574,17 @@ case class MergeIntoCommand(
     deltaTxn: OptimisticTransaction,
     files: Seq[AddFile]): LogicalPlan = {
     val plan = deltaTxn.deltaLog.createDataFrame(deltaTxn.snapshot, files).queryExecution.analyzed
-
+    val originalTargetOutputColsMap: Map[String, NamedExpression] = getTargetOutputCols(deltaTxn)
+        .map(col => col.name -> col)(scala.collection.breakOut)
+    val targetOutputColsMap = if (conf.caseSensitiveAnalysis) {
+      originalTargetOutputColsMap
+    } else {
+      CaseInsensitiveMap(originalTargetOutputColsMap)
+    }
     // For each plan output column, find the corresponding target output column (by name) and
     // create an alias
     val aliases = plan.output.map {
       case newAttrib: AttributeReference =>
-        val targetOutputColsMap = getTargetOutputColsMap(deltaTxn)
         val existingTargetAttrib = targetOutputColsMap.get(newAttrib.name)
           .getOrElse {
             throw new AnalysisException(
@@ -606,22 +611,6 @@ case class MergeIntoCommand(
         col.name,
         Alias(Literal(null, col.dataType), col.name)()
       )
-    }
-  }
-
-  private def getTargetOutputColsMap(
-    txn: OptimisticTransaction
-  ): Map[String, NamedExpression] = {
-    val originalTargetOutputColsMap = txn.metadata.schema.map { col =>
-      col.name -> targetOutputAttributesMap.getOrElse(
-        col.name,
-        Alias(Literal(null, col.dataType), col.name)()
-      )
-    }.toMap
-    if (conf.caseSensitiveAnalysis) {
-      originalTargetOutputColsMap
-    } else {
-      CaseInsensitiveMap(originalTargetOutputColsMap)
     }
   }
 
